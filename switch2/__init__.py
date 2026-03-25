@@ -2,6 +2,8 @@
 
 from .api import (
     Bill,
+    BillCharge,
+    BillDetail,
     CustomerInfo,
     MeterReading,
     Switch2ApiClient,
@@ -12,6 +14,8 @@ from .api import (
 
 __all__ = [
     "Bill",
+    "BillCharge",
+    "BillDetail",
     "CustomerInfo",
     "MeterReading",
     "Switch2ApiClient",
