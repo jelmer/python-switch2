@@ -82,6 +82,14 @@ class BillDetail:
 
 
 @dataclass
+class AccountBalance:
+    """Current account balance from the Switch2 portal."""
+
+    balance: float
+    last_updated: datetime
+
+
+@dataclass
 class Switch2Data:
     """All data fetched from the Switch2 portal."""
 
@@ -89,6 +97,7 @@ class Switch2Data:
     readings: list[MeterReading]
     registers: dict[str, str]  # register_id -> register_name
     bills: list[Bill]
+    account_balance: AccountBalance | None
 
 
 def _get_attr(tag: Tag, attr: str, default: str = "") -> str:
@@ -117,8 +126,8 @@ class Switch2ApiClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def authenticate(self) -> CustomerInfo:
-        """Log in to the Switch2 portal and return customer info."""
+    async def authenticate(self) -> tuple[CustomerInfo, BeautifulSoup]:
+        """Log in to the Switch2 portal and return customer info and dashboard soup."""
         session = await self._ensure_session()
 
         try:
@@ -156,7 +165,7 @@ class Switch2ApiClient:
             if not customer.name:
                 raise Switch2AuthError("Login failed: no customer info returned")
 
-            return customer
+            return customer, soup
 
         except aiohttp.ClientError as err:
             raise Switch2ConnectionError(
@@ -186,7 +195,8 @@ class Switch2ApiClient:
 
     async def fetch_data(self) -> Switch2Data:
         """Authenticate and fetch all meter data."""
-        customer = await self.authenticate()
+        customer, dashboard_soup = await self.authenticate()
+        account_balance = _parse_account_balance(dashboard_soup)
         session = await self._ensure_session()
 
         try:
@@ -246,6 +256,7 @@ class Switch2ApiClient:
                 readings=readings,
                 registers=registers,
                 bills=bills,
+                account_balance=account_balance,
             )
 
         except aiohttp.ClientError as err:
@@ -345,6 +356,23 @@ def _parse_currency(text: str) -> float:
     text = text.lstrip("-").lstrip("£").lstrip("\xa3").replace(",", "")
     value = float(text)
     return -value if negative else value
+
+
+def _parse_account_balance(soup: BeautifulSoup) -> AccountBalance | None:
+    """Extract the current account balance from the dashboard page."""
+    amount_el = soup.select_one(".dashboard-credit-amount-desktop")
+    if not amount_el:
+        return None
+    balance = _parse_currency(amount_el.text)
+    updated_el = soup.select_one(".dashboard-credit-lastUpdated")
+    if not updated_el:
+        return None
+    updated_text = updated_el.text.strip()
+    # Text is like "Last updated 27/02/2026 10:13"
+    if updated_text.lower().startswith("last updated"):
+        updated_text = updated_text[len("last updated") :].strip()
+    last_updated = datetime.strptime(updated_text, "%d/%m/%Y %H:%M")
+    return AccountBalance(balance=balance, last_updated=last_updated)
 
 
 def _parse_bill_charges(

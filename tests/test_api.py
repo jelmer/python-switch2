@@ -6,6 +6,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 
 from switch2.api import (
+    _parse_account_balance,
     _parse_bill_detail,
     _parse_bills,
     _parse_currency,
@@ -350,3 +351,43 @@ class ParseBillDetailTests(unittest.TestCase):
             detail.download_url,
             "https://my.switch2.co.uk/Credit/Bill/Download/2289896",
         )
+
+
+class ParseAccountBalanceTests(unittest.TestCase):
+    def test_balance_from_dashboard(self) -> None:
+        html = """
+        <div id="CreditPaymentBalanceDashTile">
+            <div class="dashboard-credit-amount-desktop font-largest">
+                &#163;0.00
+            </div>
+            <div class="dashboard-credit-lastUpdated font-small-light">
+                Last updated 27/02/2026 10:13
+            </div>
+        </div>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        balance = _parse_account_balance(soup)
+        assert balance is not None
+        self.assertEqual(balance.balance, 0.00)
+        self.assertEqual(balance.last_updated, datetime(2026, 2, 27, 10, 13))
+
+    def test_balance_with_amount_owed(self) -> None:
+        html = """
+        <div id="CreditPaymentBalanceDashTile">
+            <div class="dashboard-credit-amount-desktop font-largest">
+                &#163;172.26
+            </div>
+            <div class="dashboard-credit-lastUpdated font-small-light">
+                Last updated 15/03/2026 14:30
+            </div>
+        </div>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        balance = _parse_account_balance(soup)
+        assert balance is not None
+        self.assertEqual(balance.balance, 172.26)
+        self.assertEqual(balance.last_updated, datetime(2026, 3, 15, 14, 30))
+
+    def test_no_balance_element(self) -> None:
+        soup = BeautifulSoup("<div></div>", "html.parser")
+        self.assertIsNone(_parse_account_balance(soup))
