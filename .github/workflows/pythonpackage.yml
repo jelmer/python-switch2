@@ -29,7 +29,8 @@ jobs:
           python -m ruff format --check switch2
       - name: Typing checks
         run: |
-          python -m pip install mypy
+          python -m pip install mypy types-beautifulsoup4
+          python -m pip install -e .
           python -m mypy switch2/
       - name: Test suite run
         run: |

@@ -95,8 +95,8 @@ def _get_attr(tag: Tag, attr: str, default: str = "") -> str:
     """Get a string attribute from a BeautifulSoup tag, handling list values."""
     value = tag.get(attr, default)
     if isinstance(value, list):
-        return value[0] if value else default
-    return value
+        return str(value[0]) if value else default
+    return str(value) if value is not None else default
 
 
 class Switch2ApiClient:
