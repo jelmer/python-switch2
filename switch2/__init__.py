@@ -1,6 +1,7 @@
 """Standalone client library for the Switch2 energy portal."""
 
 from .api import (
+    AccountBalance,
     Bill,
     BillCharge,
     BillDetail,
@@ -13,6 +14,7 @@ from .api import (
 )
 
 __all__ = [
+    "AccountBalance",
     "Bill",
     "BillCharge",
     "BillDetail",
