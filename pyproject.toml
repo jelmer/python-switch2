@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "switch2"
+version = "0.1.0"
+description = "Async client library for the Switch2 energy portal"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+    { name = "Jelmer Vernooij", email = "jelmer@jelmer.uk" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Home Automation",
+    "Framework :: AsyncIO",
+]
+dependencies = [
+    "aiohttp>=3.8",
+    "beautifulsoup4>=4.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/jelmer/python-switch2"
+Repository = "https://github.com/jelmer/python-switch2"
+Issues = "https://github.com/jelmer/python-switch2/issues"
+
+[tool.mypy]
+packages = ["switch2"]
+strict = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
