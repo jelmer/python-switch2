@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from types import TracebackType
 
 import aiohttp
 from bs4 import BeautifulSoup, Tag
@@ -15,6 +17,8 @@ BASE_URL = "https://my.switch2.co.uk"
 LOGIN_URL = f"{BASE_URL}/Login"
 METER_HISTORY_URL = f"{BASE_URL}/MeterReadings/History"
 BILL_HISTORY_URL = f"{BASE_URL}/Credit/BillHistory"
+
+DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=60)
 
 
 class Switch2AuthError(Exception):
@@ -118,13 +122,24 @@ class Switch2ApiClient:
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT)
         return self._session
 
     async def close(self) -> None:
         """Close the underlying HTTP session."""
         if self._session and not self._session.closed:
             await self._session.close()
+
+    async def __aenter__(self) -> "Switch2ApiClient":
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        await self.close()
 
     async def authenticate(self) -> tuple[CustomerInfo, BeautifulSoup]:
         """Log in to the Switch2 portal and return customer info and dashboard soup."""
@@ -375,6 +390,30 @@ def _parse_account_balance(soup: BeautifulSoup) -> AccountBalance | None:
     return AccountBalance(balance=balance, last_updated=last_updated)
 
 
+def _has_class(tag: Tag, class_name: str) -> bool:
+    """Return True if the tag has the given CSS class."""
+    classes = tag.get("class")
+    if classes is None:
+        return False
+    if isinstance(classes, str):
+        return class_name in classes.split()
+    return class_name in classes
+
+
+def _parse_charge_row(row: Tag) -> BillCharge | None:
+    """Parse a single .bill-table-row into a BillCharge, or None if incomplete."""
+    desc_el = row.select_one(".bill-table-row-item-left")
+    units_el = row.select_one(".bill-table-row-item")
+    charge_el = row.select_one(".bill-table-row-item-right")
+    if not desc_el or not charge_el:
+        return None
+    return BillCharge(
+        description=desc_el.text.strip(),
+        units=units_el.text.strip() if units_el else "",
+        charge=_parse_currency(charge_el.text),
+    )
+
+
 def _parse_bill_charges(
     soup: BeautifulSoup, container_selector: str
 ) -> list[BillCharge]:
@@ -382,18 +421,49 @@ def _parse_bill_charges(
     charges: list[BillCharge] = []
     rows = soup.select(f"{container_selector} .bill-table-row-desktop .bill-table-row")
     for row in rows:
-        desc_el = row.select_one(".bill-table-row-item-left")
-        units_el = row.select_one(".bill-table-row-item")
-        charge_el = row.select_one(".bill-table-row-item-right")
-        if desc_el and charge_el:
-            charges.append(
-                BillCharge(
-                    description=desc_el.text.strip(),
-                    units=units_el.text.strip() if units_el else "",
-                    charge=_parse_currency(charge_el.text),
-                )
-            )
+        charge = _parse_charge_row(row)
+        if charge is not None:
+            charges.append(charge)
     return charges
+
+
+def _parse_keyed_currency_rows(
+    container: Tag | None,
+    fields: dict[str, Callable[[str], bool]],
+) -> dict[str, float]:
+    """Parse .bill-total-table-row rows, matching labels to keys via predicates.
+
+    Returns a mapping for each predicate that matched a row; missing keys are
+    logged at warning level so silent zeros don't hide upstream HTML changes.
+    """
+    found: dict[str, float] = {}
+    if container is None:
+        for key in fields:
+            _LOGGER.warning("Missing expected bill-total field: %s", key)
+        return found
+    for row in container.select(".bill-total-table-row"):
+        label_el = row.select_one(".bill-total-table-row-item-left")
+        value_el = row.select_one(".bill-total-table-row-item-right")
+        if not label_el or not value_el:
+            continue
+        label = label_el.text.strip()
+        for key, matches in fields.items():
+            if key not in found and matches(label):
+                found[key] = _parse_currency(value_el.text)
+                break
+    for key in fields:
+        if key not in found:
+            _LOGGER.warning("Missing expected bill-total field: %s", key)
+    return found
+
+
+def _parse_currency_header(soup: BeautifulSoup, selector: str, name: str) -> float:
+    """Parse a single currency value from a header selector, defaulting to 0.0."""
+    el = soup.select_one(selector)
+    if el is None:
+        _LOGGER.warning("Missing expected %s header", name)
+        return 0.0
+    return _parse_currency(el.text)
 
 
 def _parse_bill_detail(soup: BeautifulSoup) -> BillDetail:
@@ -437,110 +507,81 @@ def _parse_bill_detail(soup: BeautifulSoup) -> BillDetail:
         soup, "#BillItemsContainer > .bill-table-row:first-of-type"
     )
     # If the CSS child selector doesn't match, fall back to looking at
-    # desktop rows that come before .other-charges-table-row
+    # desktop rows that come before .other-charges-table-row.
     if not consumption_charges:
         items_container = soup.select_one("#BillItemsContainer")
         if items_container:
-            consumption_rows: list[Tag] = []
             for child in items_container.children:
                 if not isinstance(child, Tag):
                     continue
-                if "other-charges-table-row" in child.get("class", []):
+                if _has_class(child, "other-charges-table-row"):
                     break
-                desktop = child.select_one(".bill-table-row-desktop .bill-table-row")
-                if desktop:
-                    consumption_rows.append(desktop)
-                elif "bill-table-row-desktop" in child.get("class", []):
-                    inner = child.select_one(".bill-table-row")
-                    if inner:
-                        consumption_rows.append(inner)
-            for row in consumption_rows:
-                desc_el = row.select_one(".bill-table-row-item-left")
-                units_el = row.select_one(".bill-table-row-item")
-                charge_el = row.select_one(".bill-table-row-item-right")
-                if desc_el and charge_el:
-                    consumption_charges.append(
-                        BillCharge(
-                            description=desc_el.text.strip(),
-                            units=(units_el.text.strip() if units_el else ""),
-                            charge=_parse_currency(charge_el.text),
-                        )
-                    )
+                desktop_row = child.select_one(
+                    ".bill-table-row-desktop .bill-table-row"
+                )
+                if desktop_row is None and _has_class(child, "bill-table-row-desktop"):
+                    desktop_row = child.select_one(".bill-table-row")
+                if desktop_row is not None:
+                    charge = _parse_charge_row(desktop_row)
+                    if charge is not None:
+                        consumption_charges.append(charge)
 
-    # Other charges
+    # Other charges: desktop rows that follow the .other-charges-table-row header,
+    # stopping at the first sibling that isn't a desktop or narrow row.
     other_charges: list[BillCharge] = []
     other_header = soup.select_one(".other-charges-table-row")
     if other_header:
         sibling = other_header.next_sibling
         while sibling:
             if isinstance(sibling, Tag):
-                if "bill-table-row-desktop" in sibling.get("class", []):
+                if _has_class(sibling, "bill-table-row-desktop"):
                     charge_row = sibling.select_one(".bill-table-row")
-                    if charge_row:
-                        desc_el = charge_row.select_one(".bill-table-row-item-left")
-                        units_el = charge_row.select_one(".bill-table-row-item")
-                        charge_el = charge_row.select_one(".bill-table-row-item-right")
-                        if desc_el and charge_el:
-                            other_charges.append(
-                                BillCharge(
-                                    description=desc_el.text.strip(),
-                                    units=(units_el.text.strip() if units_el else ""),
-                                    charge=_parse_currency(charge_el.text),
-                                )
-                            )
-                elif "bill-table-row-narrow" not in sibling.get("class", []):
+                    if charge_row is not None:
+                        charge = _parse_charge_row(charge_row)
+                        if charge is not None:
+                            other_charges.append(charge)
+                elif not _has_class(sibling, "bill-table-row-narrow"):
                     break
             sibling = sibling.next_sibling
 
-    # Totals
-    totals_container = soup.select_one("#BillTotalsCollapsibleContent")
-    total_excl_vat = 0.0
-    vat = 0.0
-    total_rows = (
-        totals_container.select(".bill-total-table-row") if totals_container else []
+    # Totals. Defaults to 0.0 stay for backwards compatibility with callers, but
+    # log when an expected field is missing so problems aren't completely silent.
+    totals = _parse_keyed_currency_rows(
+        soup.select_one("#BillTotalsCollapsibleContent"),
+        {
+            "total_excl_vat": lambda label: label.startswith(
+                "Total charges excluding VAT"
+            ),
+            "vat": lambda label: label.startswith("VAT"),
+        },
     )
-    for row in total_rows:
-        label_el = row.select_one(".bill-total-table-row-item-left")
-        value_el = row.select_one(".bill-total-table-row-item-right")
-        if label_el and value_el:
-            label = label_el.text.strip()
-            if label.startswith("Total charges excluding VAT"):
-                total_excl_vat = _parse_currency(value_el.text)
-            elif label.startswith("VAT"):
-                vat = _parse_currency(value_el.text)
+    total_excl_vat = totals.get("total_excl_vat", 0.0)
+    vat = totals.get("vat", 0.0)
 
     # Bill total from the collapsible header
-    total = 0.0
-    total_header = soup.select_one(
-        "#BillTotalsContainer > .collapsible-header .bill-total-table-row-item-right"
+    total = _parse_currency_header(
+        soup,
+        "#BillTotalsContainer > .collapsible-header .bill-total-table-row-item-right",
+        "bill total",
     )
-    if total_header:
-        total = _parse_currency(total_header.text)
 
     # Account balance
-    balance_container = soup.select_one("#AccountBalanceCollapsibleContent")
-    previous_balance = 0.0
-    payments_received = 0.0
-    balance_rows = (
-        balance_container.select(".bill-total-table-row") if balance_container else []
+    balances = _parse_keyed_currency_rows(
+        soup.select_one("#AccountBalanceCollapsibleContent"),
+        {
+            "previous_balance": lambda label: label == "Previous account balance",
+            "payments_received": lambda label: label == "Payments received",
+        },
     )
-    for row in balance_rows:
-        label_el = row.select_one(".bill-total-table-row-item-left")
-        value_el = row.select_one(".bill-total-table-row-item-right")
-        if label_el and value_el:
-            label = label_el.text.strip()
-            if label == "Previous account balance":
-                previous_balance = _parse_currency(value_el.text)
-            elif label == "Payments received":
-                payments_received = _parse_currency(value_el.text)
+    previous_balance = balances.get("previous_balance", 0.0)
+    payments_received = balances.get("payments_received", 0.0)
 
-    balance = 0.0
-    balance_header = soup.select_one(
+    balance = _parse_currency_header(
+        soup,
         "#AccountBalanceContainer > .collapsible-header"
-        " .bill-total-table-row-item-right"
+        " .bill-total-table-row-item-right",
+        "account balance",
     )
-    if balance_header:
-        balance = _parse_currency(balance_header.text)
 
     # Download URL
     download_url = ""

@@ -1,11 +1,13 @@
 """Tests for the Switch2 API client."""
 
+import asyncio
 import unittest
 from datetime import datetime
 
 from bs4 import BeautifulSoup
 
 from switch2.api import (
+    Switch2ApiClient,
     _parse_account_balance,
     _parse_bill_detail,
     _parse_bills,
@@ -351,6 +353,15 @@ class ParseBillDetailTests(unittest.TestCase):
             detail.download_url,
             "https://my.switch2.co.uk/Credit/Bill/Download/2289896",
         )
+
+
+class ClientContextManagerTests(unittest.TestCase):
+    def test_aclose_without_session(self) -> None:
+        async def run() -> None:
+            async with Switch2ApiClient("e", "p") as client:
+                self.assertIsNone(client._session)
+
+        asyncio.run(run())
 
 
 class ParseAccountBalanceTests(unittest.TestCase):
