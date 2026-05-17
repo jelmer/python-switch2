@@ -33,6 +33,9 @@ Homepage = "https://github.com/jelmer/python-switch2"
 Repository = "https://github.com/jelmer/python-switch2"
 Issues = "https://github.com/jelmer/python-switch2/issues"
 
+[tool.setuptools.package-data]
+switch2 = ["py.typed"]
+
 [tool.mypy]
 packages = ["switch2"]
 strict = true
