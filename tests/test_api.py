@@ -7,6 +7,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 
 from switch2.api import (
+    Bill,
     BillCharge,
     Switch2ApiClient,
     Switch2AuthError,
@@ -523,6 +524,19 @@ class AuthenticateTests(unittest.TestCase):
         portal = FakePortal("<p>Down for maintenance</p>")
         with self.assertRaises(Switch2ParseError):
             asyncio.run(_client(portal).authenticate())
+
+
+class FetchBillDetailTests(unittest.TestCase):
+    def test_unrecognised_page(self) -> None:
+        client = Switch2ApiClient("e", "p")
+
+        async def fetch(url: str, what: str) -> BeautifulSoup:
+            return BeautifulSoup("<p>Something else</p>", "html.parser")
+
+        client._fetch = fetch  # type: ignore[method-assign,assignment]
+        bill = Bill(datetime(2026, 10, 27), 104.03, "https://example/bill/1")
+        with self.assertRaises(Switch2ParseError):
+            asyncio.run(client.fetch_bill_detail(bill))
 
 
 class FetchDataTests(unittest.TestCase):

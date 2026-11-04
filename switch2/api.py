@@ -225,7 +225,12 @@ class Switch2ApiClient:
         if not bill.detail_url:
             raise ValueError("Bill has no detail URL")
         soup = await self._fetch(bill.detail_url, "bill detail")
-        return _parse_bill_detail(soup)
+        try:
+            return _parse_bill_detail(soup)
+        except ValueError as err:
+            raise Switch2ParseError(
+                f"Unrecognised bill detail page {bill.detail_url}: {err}"
+            ) from err
 
     async def fetch_data(self) -> Switch2Data:
         """Authenticate and fetch all meter data."""
