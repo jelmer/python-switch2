@@ -30,6 +30,24 @@ async def main():
 asyncio.run(main())
 ```
 
+All exceptions derive from `Switch2Error`. `Switch2AuthError` means the
+portal rejected the credentials; `Switch2ParseError` means a page did not
+look the way the parser expects, which usually means the portal changed.
+
+`data.readings` holds the readings of the register the portal selects by
+default; `data.register_readings` maps each register in `data.registers`
+to its readings.
+
+## Command line
+
+```sh
+SWITCH2_PASSWORD=... python -m switch2 you@example.com
+```
+
+prints what the portal reports. With `--dump-html DIR` it also saves every
+page it fetches, which is the easiest way to capture a page the parser gets
+wrong.
+
 ## License
 
 Apache-2.0

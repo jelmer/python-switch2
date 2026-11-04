@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from types import TracebackType
 
@@ -21,12 +21,20 @@ BILL_HISTORY_URL = f"{BASE_URL}/Credit/BillHistory"
 DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=60)
 
 
-class Switch2AuthError(Exception):
-    """Raised when authentication fails."""
+class Switch2Error(Exception):
+    """Base class for errors raised by this library."""
 
 
-class Switch2ConnectionError(Exception):
+class Switch2AuthError(Switch2Error):
+    """Raised when the portal rejects the credentials."""
+
+
+class Switch2ConnectionError(Switch2Error):
     """Raised when a connection error occurs."""
+
+
+class Switch2ParseError(Switch2Error):
+    """Raised when a portal page does not have the expected structure."""
 
 
 @dataclass
@@ -112,10 +120,13 @@ class Switch2Data:
     """All data fetched from the Switch2 portal."""
 
     customer: CustomerInfo
+    # Readings for the register the portal selects by default.
     readings: list[MeterReading]
     registers: dict[str, str]  # register_id -> register_name
     bills: list[Bill]
     account_balance: AccountBalance | None
+    # register_id -> readings, newest first
+    register_readings: dict[str, list[MeterReading]] = field(default_factory=dict)
 
 
 def _get_attr(tag: Tag, attr: str, default: str = "") -> str:
@@ -129,9 +140,21 @@ def _get_attr(tag: Tag, attr: str, default: str = "") -> str:
 class Switch2ApiClient:
     """Client to interact with the Switch2 web portal."""
 
-    def __init__(self, email: str, password: str) -> None:
+    def __init__(
+        self,
+        email: str,
+        password: str,
+        on_page: Callable[[str, str], None] | None = None,
+    ) -> None:
+        """Create a client.
+
+        ``on_page`` is called with the URL and HTML of every page fetched,
+        which is useful for capturing pages when the parser falls behind
+        changes to the portal.
+        """
         self._email = email
         self._password = password
+        self._on_page = on_page
         self._session: aiohttp.ClientSession | None = None
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
@@ -155,51 +178,44 @@ class Switch2ApiClient:
     ) -> None:
         await self.close()
 
-    async def authenticate(self) -> tuple[CustomerInfo, BeautifulSoup]:
-        """Log in to the Switch2 portal and return customer info and dashboard soup."""
+    async def _fetch(
+        self, url: str, what: str, data: dict[str, str] | None = None
+    ) -> BeautifulSoup:
+        """GET (or with ``data``, POST to) a page and parse it."""
         session = await self._ensure_session()
-
         try:
-            # Step 1: GET the login page to get any CSRF tokens
-            async with session.get(LOGIN_URL) as resp:
+            if data is None:
+                request = session.get(url)
+            else:
+                request = session.post(url, data=data, allow_redirects=True)
+            async with request as resp:
                 if resp.status != 200:
                     raise Switch2ConnectionError(
-                        f"Failed to load login page: HTTP {resp.status}"
+                        f"Failed to load {what}: HTTP {resp.status}"
                     )
                 html = await resp.text()
-
-            soup = BeautifulSoup(html, "html.parser")
-            token_input = soup.select_one('input[name="__RequestVerificationToken"]')
-            form_data: dict[str, str] = {}
-            if token_input:
-                form_data["__RequestVerificationToken"] = _get_attr(
-                    token_input, "value"
-                )
-
-            # Step 2: POST login credentials
-            form_data["UserName"] = self._email
-            form_data["Password"] = self._password
-
-            async with session.post(
-                LOGIN_URL, data=form_data, allow_redirects=True
-            ) as resp:
-                if resp.status != 200:
-                    raise Switch2ConnectionError(
-                        f"Login request failed: HTTP {resp.status}"
-                    )
-                html = await resp.text()
-
-            soup = BeautifulSoup(html, "html.parser")
-            customer = _parse_customer_info(soup)
-            if not customer.name:
-                raise Switch2AuthError("Login failed: no customer info returned")
-
-            return customer, soup
-
         except aiohttp.ClientError as err:
             raise Switch2ConnectionError(
-                f"Connection error during login: {err}"
+                f"Connection error loading {what}: {err}"
             ) from err
+        if self._on_page is not None:
+            self._on_page(url, html)
+        return BeautifulSoup(html, "html.parser")
+
+    async def authenticate(self) -> tuple[CustomerInfo, BeautifulSoup]:
+        """Log in to the Switch2 portal and return customer info and dashboard soup."""
+        soup = await self._fetch(LOGIN_URL, "login page")
+        form_data = _form_token(soup)
+        form_data["UserName"] = self._email
+        form_data["Password"] = self._password
+
+        soup = await self._fetch(LOGIN_URL, "login response", form_data)
+        if soup.select_one('input[name="Password"]') is not None:
+            raise Switch2AuthError("Login rejected by the Switch2 portal")
+        customer = _parse_customer_info(soup)
+        if not customer.name:
+            raise Switch2ParseError("No customer info on the page after logging in")
+        return customer, soup
 
     async def fetch_bill_detail(self, bill: Bill) -> BillDetail:
         """Fetch and parse the detail page for a bill.
@@ -208,90 +224,67 @@ class Switch2ApiClient:
         """
         if not bill.detail_url:
             raise ValueError("Bill has no detail URL")
-        session = await self._ensure_session()
-        try:
-            async with session.get(bill.detail_url) as resp:
-                if resp.status != 200:
-                    raise Switch2ConnectionError(
-                        f"Failed to load bill detail: HTTP {resp.status}"
-                    )
-                html = await resp.text()
-        except aiohttp.ClientError as err:
-            raise Switch2ConnectionError(
-                f"Connection error fetching bill detail: {err}"
-            ) from err
-        return _parse_bill_detail(BeautifulSoup(html, "html.parser"))
+        soup = await self._fetch(bill.detail_url, "bill detail")
+        return _parse_bill_detail(soup)
 
     async def fetch_data(self) -> Switch2Data:
         """Authenticate and fetch all meter data."""
         customer, dashboard_soup = await self.authenticate()
         account_balance = _parse_account_balance(dashboard_soup)
-        session = await self._ensure_session()
 
-        try:
-            # GET meter readings history page
-            async with session.get(METER_HISTORY_URL) as resp:
-                if resp.status != 200:
-                    raise Switch2ConnectionError(
-                        f"Failed to load meter history: HTTP {resp.status}"
-                    )
-                html = await resp.text()
+        soup = await self._fetch(METER_HISTORY_URL, "meter history")
+        registers: dict[str, str] = {}
+        register_select = soup.select_one("#RegisterId")
+        if register_select:
+            for option in register_select.select("option"):
+                reg_id = _get_attr(option, "value")
+                if reg_id:
+                    registers[reg_id] = option.text.strip()
 
-            soup = BeautifulSoup(html, "html.parser")
+        selected = soup.select_one("#RegisterId option[selected]")
+        selected_id = _get_attr(selected, "value") if selected else ""
+        token = _form_token(soup)
 
-            # Parse available registers
-            registers: dict[str, str] = {}
-            register_select = soup.select_one("#RegisterId")
-            if register_select:
-                for option in register_select.select("option"):
-                    reg_id = option.get("value", "")
-                    if reg_id:
-                        registers[str(reg_id)] = option.text.strip()
+        register_readings: dict[str, list[MeterReading]] = {}
+        if token:
+            for register_id in registers:
+                # Ask for everything on a single page.
+                history = await self._fetch(
+                    METER_HISTORY_URL,
+                    f"meter history for register {register_id}",
+                    {
+                        **token,
+                        "Page": "1",
+                        "TotalPages": "1",
+                        "RegisterId": register_id,
+                        "PageSize": "1000000",
+                    },
+                )
+                register_readings[register_id] = _parse_readings(history)
 
-            # Try to get all readings by POSTing with a large page size
-            token_input = soup.select_one('input[name="__RequestVerificationToken"]')
-            selected_register = soup.select_one("#RegisterId option[selected]")
-
-            if token_input and selected_register:
-                form_data = {
-                    "__RequestVerificationToken": _get_attr(token_input, "value"),
-                    "Page": "1",
-                    "TotalPages": "1",
-                    "RegisterId": _get_attr(selected_register, "value"),
-                    "PageSize": "1000000",
-                }
-
-                async with session.post(
-                    METER_HISTORY_URL, data=form_data, allow_redirects=True
-                ) as resp:
-                    if resp.status == 200:
-                        html = await resp.text()
-                        soup = BeautifulSoup(html, "html.parser")
-
+        if selected_id in register_readings:
+            readings = register_readings[selected_id]
+        else:
             readings = _parse_readings(soup)
 
-            # Fetch bill history
-            async with session.get(BILL_HISTORY_URL) as resp:
-                if resp.status != 200:
-                    raise Switch2ConnectionError(
-                        f"Failed to load bill history: HTTP {resp.status}"
-                    )
-                html = await resp.text()
+        bills = _parse_bills(await self._fetch(BILL_HISTORY_URL, "bill history"))
 
-            bills = _parse_bills(BeautifulSoup(html, "html.parser"))
+        return Switch2Data(
+            customer=customer,
+            readings=readings,
+            registers=registers,
+            bills=bills,
+            account_balance=account_balance,
+            register_readings=register_readings,
+        )
 
-            return Switch2Data(
-                customer=customer,
-                readings=readings,
-                registers=registers,
-                bills=bills,
-                account_balance=account_balance,
-            )
 
-        except aiohttp.ClientError as err:
-            raise Switch2ConnectionError(
-                f"Connection error fetching data: {err}"
-            ) from err
+def _form_token(soup: BeautifulSoup) -> dict[str, str]:
+    """Return the anti-forgery token of the form on a page, if it has one."""
+    token_input = soup.select_one('input[name="__RequestVerificationToken"]')
+    if token_input is None:
+        return {}
+    return {"__RequestVerificationToken": _get_attr(token_input, "value")}
 
 
 def _parse_date(text: str) -> datetime:
