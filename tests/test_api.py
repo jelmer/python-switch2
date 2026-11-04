@@ -7,6 +7,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 
 from switch2.api import (
+    BillCharge,
     Switch2ApiClient,
     _parse_account_balance,
     _parse_bill_detail,
@@ -402,3 +403,23 @@ class ParseAccountBalanceTests(unittest.TestCase):
     def test_no_balance_element(self) -> None:
         soup = BeautifulSoup("<div></div>", "html.parser")
         self.assertIsNone(_parse_account_balance(soup))
+
+
+class BillChargeTests(unittest.TestCase):
+    def test_kwh(self) -> None:
+        charge = BillCharge("Heat", "252 kWh", 42.87)
+        self.assertEqual(charge.quantity, 252.0)
+        self.assertEqual(charge.unit, "kWh")
+
+    def test_days(self) -> None:
+        charge = BillCharge("Heat Standing Charge", "30.00 days", 22.46)
+        self.assertEqual(charge.quantity, 30.0)
+        self.assertEqual(charge.unit, "days")
+
+    def test_thousands(self) -> None:
+        self.assertEqual(BillCharge("Heat", "1,234 kWh", 1.0).quantity, 1234.0)
+
+    def test_no_units(self) -> None:
+        charge = BillCharge("Adjustment", "", -3.0)
+        self.assertIsNone(charge.quantity)
+        self.assertEqual(charge.unit, "")

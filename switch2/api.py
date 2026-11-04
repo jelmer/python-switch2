@@ -65,6 +65,20 @@ class BillCharge:
     units: str
     charge: float
 
+    @property
+    def quantity(self) -> float | None:
+        """The number of units charged for, e.g. 252.0 for "252 kWh"."""
+        try:
+            return float(self.units.split()[0].replace(",", ""))
+        except (IndexError, ValueError):
+            return None
+
+    @property
+    def unit(self) -> str:
+        """The unit charged for, e.g. "kWh" for "252 kWh"."""
+        parts = self.units.split(maxsplit=1)
+        return parts[1] if len(parts) > 1 else ""
+
 
 @dataclass
 class BillDetail:
