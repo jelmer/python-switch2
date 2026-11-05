@@ -12,6 +12,7 @@ from switch2.api import (
     Switch2ApiClient,
     Switch2AuthError,
     Switch2ParseError,
+    Switch2UnavailableError,
     _parse_account_balance,
     _parse_bill_detail,
     _parse_bills,
@@ -469,8 +470,9 @@ def _reading_row(date: str, amount: str) -> str:
 class FakePortal:
     """Serves canned pages in place of Switch2ApiClient._fetch."""
 
-    def __init__(self, login_response: str) -> None:
+    def __init__(self, login_response: str, meter_history: str = METER_HISTORY) -> None:
         self.login_response = login_response
+        self.meter_history = meter_history
         self.posts: list[tuple[str, dict[str, str]]] = []
 
     async def __call__(
@@ -482,7 +484,7 @@ class FakePortal:
             html = LOGIN_FORM if data is None else self.login_response
         elif url.endswith("/MeterReadings/History"):
             if data is None:
-                html = METER_HISTORY
+                html = self.meter_history
             elif data["RegisterId"] == "R1":
                 html = _reading_row("26th October 2026", "9166 kWh")
             else:
@@ -552,3 +554,19 @@ class FetchDataTests(unittest.TestCase):
             {"R1": [9166.0], "R2": [512.0]},
         )
         self.assertEqual([x.amount for x in data.readings], [9166.0])
+
+    def test_no_meters_available(self) -> None:
+        portal = FakePortal(
+            DASHBOARD,
+            meter_history="""
+            <form>
+              <input name="__RequestVerificationToken" value="tok2">
+              <select id="RegisterId">
+                <option value="-1" selected>No meters available</option>
+              </select>
+            </form>
+            """,
+        )
+        with self.assertRaises(Switch2UnavailableError):
+            asyncio.run(_client(portal).fetch_data())
+        self.assertEqual(portal.posts[1:], [])

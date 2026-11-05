@@ -38,6 +38,14 @@ class Switch2ParseError(Switch2Error):
     """Raised when a portal page does not have the expected structure."""
 
 
+class Switch2UnavailableError(Switch2Error):
+    """Raised when the portal fails to load data it normally has.
+
+    This happens from time to time, e.g. it lists no meters for an account
+    that has them; trying again later usually works.
+    """
+
+
 @dataclass
 class CustomerInfo:
     """Customer information from the Switch2 portal."""
@@ -246,6 +254,10 @@ class Switch2ApiClient:
                 reg_id = _get_attr(option, "value")
                 if reg_id:
                     registers[reg_id] = option.text.strip()
+        if "-1" in registers:
+            raise Switch2UnavailableError(
+                f"Portal could not load any meters: {registers['-1']!r}"
+            )
 
         selected = soup.select_one("#RegisterId option[selected]")
         selected_id = _get_attr(selected, "value") if selected else ""

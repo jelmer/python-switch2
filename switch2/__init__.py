@@ -13,6 +13,7 @@ from .api import (
     Switch2Data,
     Switch2Error,
     Switch2ParseError,
+    Switch2UnavailableError,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "Switch2Data",
     "Switch2Error",
     "Switch2ParseError",
+    "Switch2UnavailableError",
 ]
