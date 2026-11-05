@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -35,6 +36,14 @@ class Switch2ConnectionError(Switch2Error):
 
 class Switch2ParseError(Switch2Error):
     """Raised when a portal page does not have the expected structure."""
+
+
+class Switch2UnavailableError(Switch2Error):
+    """Raised when the portal fails to load data it normally has.
+
+    This happens from time to time, e.g. it lists no meters for an account
+    that has them; trying again later usually works.
+    """
 
 
 @dataclass
@@ -245,6 +254,10 @@ class Switch2ApiClient:
                 reg_id = _get_attr(option, "value")
                 if reg_id:
                     registers[reg_id] = option.text.strip()
+        if "-1" in registers:
+            raise Switch2UnavailableError(
+                f"Portal could not load any meters: {registers['-1']!r}"
+            )
 
         selected = soup.select_one("#RegisterId option[selected]")
         selected_id = _get_attr(selected, "value") if selected else ""
@@ -294,9 +307,7 @@ def _form_token(soup: BeautifulSoup) -> dict[str, str]:
 
 def _parse_date(text: str) -> datetime:
     """Parse a date string like '27th February 2026'."""
-    # Strip ordinal suffixes (1st, 2nd, 3rd, 4th, etc.)
-    for suffix in ("st ", "nd ", "rd ", "th "):
-        text = text.replace(suffix, " ")
+    text = re.sub(r"^(\d+)(?:st|nd|rd|th)\b", r"\1", text.strip())
     for fmt in ("%d %B %Y", "%d %b %Y"):
         try:
             return datetime.strptime(text, fmt)

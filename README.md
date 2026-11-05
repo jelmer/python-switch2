@@ -14,6 +14,7 @@ pip install switch2
 import asyncio
 from switch2 import Switch2ApiClient
 
+
 async def main():
     async with Switch2ApiClient("you@example.com", "your-password") as client:
         data = await client.fetch_data()
@@ -27,12 +28,15 @@ async def main():
             detail = await client.fetch_bill_detail(bill)
             print(f"    invoice {detail.invoice_number}, total £{detail.total}")
 
+
 asyncio.run(main())
 ```
 
 All exceptions derive from `Switch2Error`. `Switch2AuthError` means the
 portal rejected the credentials; `Switch2ParseError` means a page did not
-look the way the parser expects, which usually means the portal changed.
+look the way the parser expects, which usually means the portal changed;
+`Switch2UnavailableError` means the portal failed to load data it normally
+has, which tends to pass if you try again later.
 
 `data.readings` holds the readings of the register the portal selects by
 default; `data.register_readings` maps each register in `data.registers`
