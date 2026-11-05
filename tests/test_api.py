@@ -35,6 +35,10 @@ class ParseDateTests(unittest.TestCase):
     def test_ordinal_rd(self) -> None:
         self.assertEqual(_parse_date("3rd April 2025"), datetime(2025, 4, 3))
 
+    def test_month_containing_suffix(self) -> None:
+        self.assertEqual(_parse_date("27th August 2026"), datetime(2026, 8, 27))
+        self.assertEqual(_parse_date("1st August 2026"), datetime(2026, 8, 1))
+
     def test_abbreviated_month(self) -> None:
         self.assertEqual(_parse_date("15th Jan 2025"), datetime(2025, 1, 15))
 
