@@ -7,7 +7,11 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 
 from switch2.api import (
+    Bill,
+    BillCharge,
     Switch2ApiClient,
+    Switch2AuthError,
+    Switch2ParseError,
     _parse_account_balance,
     _parse_bill_detail,
     _parse_bills,
@@ -402,3 +406,145 @@ class ParseAccountBalanceTests(unittest.TestCase):
     def test_no_balance_element(self) -> None:
         soup = BeautifulSoup("<div></div>", "html.parser")
         self.assertIsNone(_parse_account_balance(soup))
+
+
+class BillChargeTests(unittest.TestCase):
+    def test_kwh(self) -> None:
+        charge = BillCharge("Heat", "252 kWh", 42.87)
+        self.assertEqual(charge.quantity, 252.0)
+        self.assertEqual(charge.unit, "kWh")
+
+    def test_days(self) -> None:
+        charge = BillCharge("Heat Standing Charge", "30.00 days", 22.46)
+        self.assertEqual(charge.quantity, 30.0)
+        self.assertEqual(charge.unit, "days")
+
+    def test_thousands(self) -> None:
+        self.assertEqual(BillCharge("Heat", "1,234 kWh", 1.0).quantity, 1234.0)
+
+    def test_no_units(self) -> None:
+        charge = BillCharge("Adjustment", "", -3.0)
+        self.assertIsNone(charge.quantity)
+        self.assertEqual(charge.unit, "")
+
+
+LOGIN_FORM = """
+<form>
+  <input name="__RequestVerificationToken" value="tok">
+  <input name="UserName"><input name="Password" type="password">
+</form>
+"""
+
+DASHBOARD = """
+<span class="customer-info-name">John Doe</span>
+<span class="customer-info-account-number">ACC-123</span>
+<span class="customer-info-address">42 Test Lane</span>
+"""
+
+METER_HISTORY = """
+<form>
+  <input name="__RequestVerificationToken" value="tok2">
+  <select id="RegisterId">
+    <option value="R1" selected>Heat Meter</option>
+    <option value="R2">Hot Water Meter</option>
+  </select>
+</form>
+"""
+
+
+def _reading_row(date: str, amount: str) -> str:
+    return f"""
+    <div class="meter-reading-history-table-data-row desktop-layout">
+      <div class="meter-reading-history-table-data-date-row-item">{date}</div>
+      <div class="meter-reading-history-table-data-amount-row-item">{amount}</div>
+      <div class="meter-reading-history-table-data-type-row-item">Actual</div>
+    </div>
+    """
+
+
+class FakePortal:
+    """Serves canned pages in place of Switch2ApiClient._fetch."""
+
+    def __init__(self, login_response: str) -> None:
+        self.login_response = login_response
+        self.posts: list[tuple[str, dict[str, str]]] = []
+
+    async def __call__(
+        self, url: str, what: str, data: dict[str, str] | None = None
+    ) -> BeautifulSoup:
+        if data is not None:
+            self.posts.append((url, data))
+        if url.endswith("/Login"):
+            html = LOGIN_FORM if data is None else self.login_response
+        elif url.endswith("/MeterReadings/History"):
+            if data is None:
+                html = METER_HISTORY
+            elif data["RegisterId"] == "R1":
+                html = _reading_row("26th October 2026", "9166 kWh")
+            else:
+                html = _reading_row("26th October 2026", "512 kWh")
+        elif url.endswith("/Credit/BillHistory"):
+            html = "<div></div>"
+        else:
+            raise AssertionError(f"unexpected fetch of {url}")
+        return BeautifulSoup(html, "html.parser")
+
+
+def _client(portal: FakePortal) -> Switch2ApiClient:
+    client = Switch2ApiClient("e@example.com", "pw")
+    client._fetch = portal  # type: ignore[method-assign]
+    return client
+
+
+class AuthenticateTests(unittest.TestCase):
+    def test_success(self) -> None:
+        portal = FakePortal(DASHBOARD)
+        customer, _ = asyncio.run(_client(portal).authenticate())
+        self.assertEqual(customer.account_number, "ACC-123")
+        self.assertEqual(
+            portal.posts,
+            [
+                (
+                    "https://my.switch2.co.uk/Login",
+                    {
+                        "__RequestVerificationToken": "tok",
+                        "UserName": "e@example.com",
+                        "Password": "pw",
+                    },
+                )
+            ],
+        )
+
+    def test_rejected(self) -> None:
+        portal = FakePortal(LOGIN_FORM + "<p>Invalid login attempt.</p>")
+        with self.assertRaises(Switch2AuthError):
+            asyncio.run(_client(portal).authenticate())
+
+    def test_unrecognised_page(self) -> None:
+        portal = FakePortal("<p>Down for maintenance</p>")
+        with self.assertRaises(Switch2ParseError):
+            asyncio.run(_client(portal).authenticate())
+
+
+class FetchBillDetailTests(unittest.TestCase):
+    def test_unrecognised_page(self) -> None:
+        client = Switch2ApiClient("e", "p")
+
+        async def fetch(url: str, what: str) -> BeautifulSoup:
+            return BeautifulSoup("<p>Something else</p>", "html.parser")
+
+        client._fetch = fetch  # type: ignore[method-assign,assignment]
+        bill = Bill(datetime(2026, 10, 27), 104.03, "https://example/bill/1")
+        with self.assertRaises(Switch2ParseError):
+            asyncio.run(client.fetch_bill_detail(bill))
+
+
+class FetchDataTests(unittest.TestCase):
+    def test_readings_per_register(self) -> None:
+        data = asyncio.run(_client(FakePortal(DASHBOARD)).fetch_data())
+        self.assertEqual(data.registers, {"R1": "Heat Meter", "R2": "Hot Water Meter"})
+        self.assertEqual(
+            {r: [x.amount for x in v] for r, v in data.register_readings.items()},
+            {"R1": [9166.0], "R2": [512.0]},
+        )
+        self.assertEqual([x.amount for x in data.readings], [9166.0])

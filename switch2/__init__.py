@@ -11,6 +11,8 @@ from .api import (
     Switch2AuthError,
     Switch2ConnectionError,
     Switch2Data,
+    Switch2Error,
+    Switch2ParseError,
 )
 
 __all__ = [
@@ -24,4 +26,6 @@ __all__ = [
     "Switch2AuthError",
     "Switch2ConnectionError",
     "Switch2Data",
+    "Switch2Error",
+    "Switch2ParseError",
 ]
